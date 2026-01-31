@@ -22,7 +22,8 @@ A step-by-step, production-style streaming analytics project using **Python**, *
 - Docker Compose
 
 ## Dataset
-**NYC TLC Taxi Trips (CSV)**
+**NYC TLC Yellow Taxi Trips (Parquet)**
+- Current file: `data/raw/yellow_tripdata_2025-01.parquet`
 - Use a small sample for local development.
 - Optionally map NYC zones to London-style boroughs for a London theme.
 
@@ -71,20 +72,28 @@ project-root/
 - Prometheus + Grafana
 - Metrics for throughput, lag, and errors
 
-## Getting started (placeholder)
-When the repo is ready, you’ll be able to:
-1. Start services with Docker Compose
-2. Run the producer
-3. Run the stream processor
-4. Run the API
+## Getting started (current)
+1. Start services:
+   - `docker compose -f docker/docker-compose.yml up -d`
+2. Run the producer:
+   - `python apps/producer/main.py --file data/raw/yellow_tripdata_2025-01.parquet`
+3. Inspect messages:
+   - Kafka UI at `http://localhost:8080` → Topics → `taxi_rides.raw` → Messages
 
-## Status
-- Repo creation in progress
-- Initial plan and structure ready
+## Progress
+- Docker Desktop installed and running
+- Docker Compose stack created (Kafka, Zookeeper, Schema Registry, Kafka UI)
+- Kafka UI accessible at `http://localhost:8080`
+- Dataset downloaded: `data/raw/yellow_tripdata_2025-01.parquet`
+- Python producer created (parquet → Kafka JSON)
+
+## Current status
+- Ingestion working: Kafka topic `taxi_rides.raw` has JSON messages
+- Producer adds `ride_id` (if missing) and `event_ts` to each event
 
 ## Next steps
-- Add `docker-compose.yml`
-- Implement producer
-- Implement stream processor
-- Implement API
-- Add monitoring
+- Create `apps/processor/` (stream processing)
+- Define clean schema and validation
+- Add aggregates + DLQ topic
+- Add FastAPI service
+- Add Prometheus + Grafana
