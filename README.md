@@ -3,23 +3,28 @@
 A step-by-step, production-style streaming analytics project using **Python**, **Kafka**, and **Docker Compose**. The pipeline ingests real-world taxi trip data (NYC TLC), processes it in real time, and serves analytics via an API — all locally.
 
 ## Why this project
+
 - Practice real Kafka usage: producers, consumers, consumer groups, and topic design
 - Build streaming analytics with windowed aggregations
 - Serve results via a Python API
 - Add monitoring to understand throughput, lag, and errors
 
 ## High-level architecture
-1. **Producer (Python)** reads NYC TLC CSV data and publishes events to Kafka.
-2. **Stream processor (Python)** cleans/validates data and computes aggregates.
+1. **Producer (Python)** reads NYC TLC parquet data and publishes events to Kafka.
+2. **Stream processor (Python, confluent-kafka)** cleans/validates data, computes aggregates, routes bad records to DLQ.
 3. **API (FastAPI)** exposes analytics from compacted aggregates.
-4. **Observability** via Prometheus + Grafana.
+4. **Live dashboard (Streamlit)** shows real-time pipeline metrics, analytics, and health — auto-refreshes as the pipeline runs.
 
 ## Tech stack
 - Kafka (local, single broker)
-- Python (producer + processor + API)
+- Python (producer + processor + API + dashboard)
 - FastAPI
-- Prometheus + Grafana
+- Streamlit (live dashboard — replaces Prometheus + Grafana)
 - Docker Compose
+
+> **Why not Faust?** Faust is effectively unmaintained. A plain `confluent-kafka` consumer teaches Kafka fundamentals (offsets, consumer groups, partition assignment) without a framework hiding the details.
+>
+> **Why not Prometheus + Grafana?** Too heavy for a local project. Streamlit gives a live, auto-refreshing dashboard in pure Python — easier to run, easier to understand, and more impressive on a CV.
 
 ## Dataset
 **NYC TLC Yellow Taxi Trips (Parquet)**
