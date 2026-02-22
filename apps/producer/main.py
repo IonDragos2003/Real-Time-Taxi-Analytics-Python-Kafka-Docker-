@@ -33,6 +33,7 @@ def main():
     producer = KafkaProducer(
         bootstrap_servers=args.bootstrap,
         value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
+        key_serializer=lambda k: str(k).encode("utf-8"),
     )
 
     parquet_file = pq.ParquetFile(args.file)
@@ -48,7 +49,7 @@ def main():
                     raise StopIteration
 
                 event = row_to_event(row, sent + 1)
-                producer.send(args.topic, value=event)
+                producer.send(args.topic, key=event.get("PULocationID"), value=event)
                 sent += 1
 
                 if sleep_per_row:
