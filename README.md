@@ -42,39 +42,36 @@ parquet file
 ## Tech stack
 
 - **Kafka** (single broker, local) + Zookeeper + Schema Registry + Kafka UI
-- **Python** — `kafka-python` for producer and processor, FastAPI, Streamlit
+- **Python** — `kafka-python`, FastAPI, Streamlit
 - **Docker Compose** — runs the full Kafka stack locally
 
 ## Dataset
 
 **NYC TLC Yellow Taxi Trips (Parquet)**
 
-- `data/raw/yellow_tripdata_2025-01.parquet`
-- `data/raw/yellow_tripdata_2025-02.parquet`
-- `data/raw/yellow_tripdata_2025-03.parquet`
-- `data/raw/yellow_tripdata_2025-04.parquet`
-- `data/raw/yellow_tripdata_2025-05.parquet`
-- `data/raw/yellow_tripdata_2025-06.parquet`
-- Run the producer with `--max-rows` to use a manageable sample locally
+- `data/raw/yellow_tripdata_2025-01.parquet` through `2025-06.parquet`
+- 3,000 rows per file used locally (`MAX_ROWS` in `app/config.py`) — 18,000 total messages
 
 ## Repository layout
 
 ```
 project-root/
-├─ docker/
-│  └─ docker-compose.yml
-├─ data/
-│  └─ raw/                        # parquet source files
-├─ apps/
-│  ├─ producer/                   # reads parquet → publishes to taxi_rides.raw
-│  │  ├─ main.py
-│  │  └─ requirements.txt
-│  ├─ processor/                  # consumes raw → cleans, aggregates, routes DLQ
-│  │  ├─ main.py
-│  │  └─ requirements.txt
-│  ├─ api/                        # FastAPI serving layer (coming soon)
-│  └─ dashboard/                  # Streamlit live dashboard (coming soon)
-└─ README.md
+├── docker/
+│   └── docker-compose.yml
+├── data/
+│   └── raw/                   # parquet source files (not committed)
+├── logs/                      # per-run processor logs (not committed)
+├── app/
+│   ├── main.py                # CLI entrypoint — --produce / --process / --api
+│   ├── config.py              # all constants (Kafka, topics, partition counts, throttle)
+│   ├── utils.py               # shared: serializers, make_producer(), make_consumer(), setup_topics()
+│   ├── logger.py              # logging setup — file + console, named by component + PID
+│   ├── producer.py            # run_producer() — globs data/raw, streams to taxi_rides.raw
+│   ├── processor.py           # run_processor() — validate, normalise, aggregate, DLQ
+│   └── api/
+│       └── main.py            # FastAPI app (coming soon)
+├── requirements.txt
+└── README.md
 ```
 
 ## Kafka topics
@@ -86,6 +83,8 @@ project-root/
 | `taxi_rides.dlq` | 1 | — | Rejected records with rejection reason attached |
 | `taxi_aggregates` | 1 | compacted | Rolling stats per pickup zone (latest value per zone key) |
 
+Topics are created automatically on first run via `KafkaAdminClient` in `utils.setup_topics()`.
+
 ## Getting started
 
 ### 1. Start the Kafka stack
@@ -94,76 +93,87 @@ project-root/
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-Kafka UI available at **[http://localhost:8080](http://localhost:8080)**
+Kafka UI at **[http://localhost:8080](http://localhost:8080)**
 
-> In the UI, set **Value Serde → JSON** when inspecting topics to render messages correctly.
+> Set **Value Serde → JSON** in the UI when inspecting topics.
 
 ### 2. Set up the Python environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r apps/producer/requirements.txt
-pip install -r apps/processor/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 3. Run two processor instances (Terminal 1 and 2)
 
 ```bash
-# Terminal 1
-source .venv/bin/activate
-python3 apps/processor/main.py
-
-# Terminal 2
-source .venv/bin/activate
-python3 apps/processor/main.py
+python3 -u -m app.main --process
 ```
 
-Kafka will automatically assign partitions across both instances (consumer group rebalancing). With 3 partitions, one instance gets 2 partitions and the other gets 1.
+Kafka automatically assigns partitions across both instances. With 3 partitions and 2 instances, one gets 2 partitions and the other gets 1.
 
-### 4. Run the producer across all 6 months (Terminal 3)
+### 4. Run the producer (Terminal 3)
 
 ```bash
-source .venv/bin/activate
-for month in 01 02 03 04 05 06; do
-  echo "--- Processing 2025-${month} ---"
-  python3 apps/producer/main.py \
-    --file data/raw/yellow_tripdata_2025-${month}.parquet \
-    --max-rows 3000 \
-    --rows-per-sec 200
-done
+python3 -u -m app.main --produce
 ```
 
-This sends 18,000 messages total (3,000 per month). The processor instances will print progress every 100 messages and publish zone aggregates every 10 seconds.
+Streams 3,000 rows from each of the 6 parquet files (18,000 total). Rate and row limit are set in `app/config.py`.
 
-### 5. Verify partition assignment
+### 5. Start the API (Terminal 4)
 
 ```bash
-docker exec -it $(docker ps -qf "name=kafka") \
-  kafka-consumer-groups.sh \
-  --bootstrap-server localhost:9092 \
-  --describe \
-  --group processor
+python3 -u -m app.main --api
 ```
 
-You'll see which partitions each processor instance owns, and the current lag per partition.
+Interactive docs at **[http://localhost:8000/docs](http://localhost:8000/docs)**
 
-## Producer flags
+### 6. Verify partition split
 
-| Flag | Default | Description |
+```bash
+grep "partition=" logs/processor_*.log \
+  | awk -F'partition=' '{print $2}' \
+  | cut -d' ' -f1 \
+  | sort | uniq -c
+```
+
+Each partition number appears in exactly one log file — proving no two instances processed the same message.
+
+## Configuration
+
+All runtime knobs are in `app/config.py` — no CLI flags needed:
+
+| Constant | Default | Description |
 | --- | --- | --- |
-| `--file` | required | Path to parquet file |
-| `--topic` | `taxi_rides.raw` | Target Kafka topic |
-| `--bootstrap` | `localhost:29092` | Kafka bootstrap server |
-| `--rows-per-sec` | `50` | Throttle rate |
-| `--max-rows` | `0` (no limit) | Cap total messages sent |
-| `--batch-size` | `5000` | Parquet read batch size |
+| `KAFKA_BOOTSTRAP` | `localhost:29092` | Kafka broker address |
+| `DATA_DIR` | `data/raw` | Producer globs `*.parquet` files here |
+| `ROWS_PER_SEC` | `200` | Throttle rate per file |
+| `MAX_ROWS` | `3000` | Max rows per file (0 = no limit) |
+| `BATCH_SIZE` | `5000` | Parquet read batch size |
+| `ACTIVE_WINDOW_SEC` | `300` | 5-min window for active ride count |
+| `FARE_WINDOW_SEC` | `900` | 15-min window for avg fare |
+| `AGGREGATE_INTERVAL_SEC` | `10` | How often aggregates are published |
+| `RAW_PARTITIONS` | `3` | Partition count for taxi_rides.raw |
+
+## Logging
+
+Each processor instance writes to its own log file under `logs/`, named `processor_<PID>.log`. This allows you to inspect exactly which partitions and messages each instance handled.
+
+- **Console** — INFO and above (progress every 100 messages, partition assignments, aggregate publishes)
+- **File** — DEBUG and above (every message: partition, offset, key, zone)
+
+```text
+logs/
+├── processor_44821.log   ← instance 1 (partitions 0, 1)
+└── processor_44822.log   ← instance 2 (partition 2)
+```
 
 ## Key Kafka concepts demonstrated
 
 | Concept | Where |
 | --- | --- |
-| **Producers** | `apps/producer/main.py` — publishes JSON events from parquet |
+| **Producers** | `app/producer.py` — publishes JSON events from parquet files |
 | **Message keys** | `PULocationID` as key → consistent partition routing per zone |
 | **Partitions** | 3 partitions on `taxi_rides.raw` → parallel consumption |
 | **Consumer groups** | Both processor instances share group `"processor"` |
@@ -173,16 +183,19 @@ You'll see which partitions each processor instance owns, and the current lag pe
 | **Compacted topics** | `taxi_aggregates` retains only the latest aggregate per zone key |
 | **Windowed aggregations** | In-memory 5-min active count and 15-min avg fare per zone |
 | **Stream processor pattern** | Processor consumes one topic and produces to multiple output topics |
+| **Topic creation via AdminClient** | Topics created programmatically with correct partition counts on startup |
 
 ## Next steps
 
-### Phase 3 — FastAPI serving layer
+### Phase 3 — FastAPI serving layer *(in progress)*
 
 Read the compacted `taxi_aggregates` topic into memory and expose HTTP endpoints:
 
-- `GET /stats/active-rides` — active rides per zone in the last 5 minutes
-- `GET /stats/avg-fare` — average fare per zone in the last 15 minutes
-- `GET /health` — pipeline health (message counts, DLQ rate)
+- `GET /health` — pipeline health (message counts, DLQ rate, zones tracked)
+- `GET /stats/active-rides` — active rides per zone, sorted busiest first
+- `GET /stats/avg-fare` — avg fare per zone, sorted highest first
+- `GET /stats/summary` — top 10 zones by rides and by fare
+- `GET /stats/zones/{zone_id}` — full stats for a single zone
 
 ### Phase 4 — Streamlit dashboard
 
@@ -202,23 +215,24 @@ Single app with three tabs, auto-refreshing while the pipeline runs:
 | Parallel | 3 | 3 | ~1100 msg/s | low |
 | Overloaded | 1 | 3 | ~400 msg/s | builds up |
 
-Surface results in the Streamlit dashboard under a "Performance" tab.
-
 **Other additions worth exploring:**
 
-- **Offset reset / replay** — add `--from-beginning` flag to processor to reset offset and replay all historical messages, demonstrating Kafka's commit log nature
-- **Idempotent producer** — add `acks='all'` to the producer (one-line change) to guarantee at-least-once delivery even on network hiccups
-- **Consumer lag monitoring** — track and visualise lag in the Streamlit dashboard (the most-watched metric in real deployments)
-- **Replication** — add a second broker to docker-compose for fault tolerance demonstration (higher complexity, lower priority)
-- **Schema Registry + Avro** — enforce message schema at the broker level instead of relying on JSON conventions
+- **Offset reset / replay** — `--from-beginning` flag to replay all historical messages, demonstrating Kafka's commit log nature
+- **Idempotent producer** — `acks='all'` for at-least-once delivery guarantee
+- **Consumer lag monitoring** — track and visualise lag in the Streamlit dashboard
+- **Replication** — second broker in docker-compose for fault tolerance
+- **Schema Registry + Avro** — enforce message schema at the broker level
 
 ## Progress
 
 - [x] Docker Compose stack (Kafka, Zookeeper, Schema Registry, Kafka UI)
-- [x] Python producer (parquet → `taxi_rides.raw`, keyed by `PULocationID`)
-- [x] Python processor (validate, normalise, aggregate, DLQ routing)
-- [x] 3 partitions on `taxi_rides.raw`, parallel processor instances via consumer group
+- [x] Modular Python app (`app/`) with shared config, utils, and logger
+- [x] Producer — globs `data/raw/*.parquet`, streams to `taxi_rides.raw` keyed by `PULocationID`
+- [x] Processor — validate, normalise, aggregate, DLQ routing
+- [x] Topics created programmatically via `KafkaAdminClient` (3 partitions on raw, compacted aggregates)
+- [x] Two processor instances in parallel — Kafka assigns partitions automatically
+- [x] Verified no message overlap across instances via partition logs
 - [x] Processed 18,000 messages across 6 months of NYC TLC data
-- [ ] FastAPI serving layer
+- [x] FastAPI serving layer — `/health`, `/stats/active-rides`, `/stats/avg-fare`, `/stats/summary`, `/stats/zones/{id}`
 - [ ] Streamlit live dashboard
 - [ ] Benchmarking mode
