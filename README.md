@@ -207,7 +207,7 @@ Single app with three tabs, auto-refreshing while the pipeline runs:
 
 ### Future improvements
 
-**Benchmarking mode** — a genuine CV differentiator. Run the same 10k messages with different configs and report results:
+**Benchmarking mode** — Run the same 10k messages with different configs and report results:
 
 | Config | Partitions | Consumers | Throughput | Lag |
 | --- | --- | --- | --- | --- |

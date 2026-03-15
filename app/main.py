@@ -30,7 +30,7 @@ def main():
         run_processor()
 
     if args.api:
-        uvicorn.run("app.api.api:app", host="0.0.0.0", port=8000)
+        uvicorn.run("app.api.main:app", host="0.0.0.0", port=8000)
 
 
 if __name__ == "__main__":
