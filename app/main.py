@@ -21,7 +21,8 @@ def main():
         print("Nothing to run. Use --produce, --process, or --api (or combine them).")
         return
 
-    setup_topics()
+    if args.produce or args.process:
+        setup_topics()
 
     if args.produce:
         run_producer()

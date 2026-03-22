@@ -11,7 +11,7 @@ A production-style streaming analytics project using **Python**, **Kafka**, and 
 
 ## High-level architecture
 
-```
+```text
 parquet file
     │
     ▼
@@ -36,8 +36,8 @@ parquet file
 
 1. **Producer** — reads NYC TLC parquet data row by row, publishes each trip as a JSON event to `taxi_rides.raw`, keyed by `PULocationID` so all rides from the same zone route to the same partition
 2. **Processor** — consumes `taxi_rides.raw`, validates and normalises records, computes windowed aggregations per zone (5-min active count, 15-min avg fare), routes bad records to DLQ; multiple instances share load via consumer group
-3. **API (FastAPI)** — reads `taxi_aggregates` into memory, serves HTTP endpoints *(coming soon)*
-4. **Dashboard (Streamlit)** — live auto-refreshing view of pipeline metrics, analytics, and health *(coming soon)*
+3. **API (FastAPI)** — reads `taxi_aggregates` into memory, serves HTTP endpoints for per-zone stats
+4. **Dashboard (Streamlit)** — live auto-refreshing view of pipeline metrics, analytics, and health
 
 ## Tech stack
 
@@ -47,14 +47,14 @@ parquet file
 
 ## Dataset
 
-**NYC TLC Yellow Taxi Trips (Parquet)**
+### NYC TLC Yellow Taxi Trips (Parquet)
 
 - `data/raw/yellow_tripdata_2025-01.parquet` through `2025-06.parquet`
 - 3,000 rows per file used locally (`MAX_ROWS` in `app/config.py`) — 18,000 total messages
 
 ## Repository layout
 
-```
+```text
 project-root/
 ├── docker/
 │   └── docker-compose.yml
@@ -68,8 +68,9 @@ project-root/
 │   ├── logger.py              # logging setup — file + console, named by component + PID
 │   ├── producer.py            # run_producer() — globs data/raw, streams to taxi_rides.raw
 │   ├── processor.py           # run_processor() — validate, normalise, aggregate, DLQ
+│   ├── dashboard.py           # Streamlit live dashboard
 │   └── api/
-│       └── main.py            # FastAPI app (coming soon)
+│       └── main.py            # FastAPI serving layer
 ├── requirements.txt
 └── README.md
 ```
@@ -129,7 +130,15 @@ python3 -u -m app.main --api
 
 Interactive docs at **[http://localhost:8000/docs](http://localhost:8000/docs)**
 
-### 6. Verify partition split
+### 6. Start the Streamlit dashboard (Terminal 5)
+
+```bash
+streamlit run app/dashboard.py
+```
+
+Dashboard at **[http://localhost:8501](http://localhost:8501)**
+
+### 7. Verify partition split
 
 ```bash
 grep "partition=" logs/processor_*.log \
@@ -187,24 +196,6 @@ logs/
 
 ## Next steps
 
-### Phase 3 — FastAPI serving layer *(in progress)*
-
-Read the compacted `taxi_aggregates` topic into memory and expose HTTP endpoints:
-
-- `GET /health` — pipeline health (message counts, DLQ rate, zones tracked)
-- `GET /stats/active-rides` — active rides per zone, sorted busiest first
-- `GET /stats/avg-fare` — avg fare per zone, sorted highest first
-- `GET /stats/summary` — top 10 zones by rides and by fare
-- `GET /stats/zones/{zone_id}` — full stats for a single zone
-
-### Phase 4 — Streamlit dashboard
-
-Single app with three tabs, auto-refreshing while the pipeline runs:
-
-- **Live metrics** — producer throughput, msgs/sec, total processed
-- **Analytics** — active rides per zone, avg fare per zone (charts)
-- **Health** — DLQ count, bad message rate, consumer lag per partition
-
 ### Future improvements
 
 **Benchmarking mode** — Run the same 10k messages with different configs and report results:
@@ -234,5 +225,5 @@ Single app with three tabs, auto-refreshing while the pipeline runs:
 - [x] Verified no message overlap across instances via partition logs
 - [x] Processed 18,000 messages across 6 months of NYC TLC data
 - [x] FastAPI serving layer — `/health`, `/stats/active-rides`, `/stats/avg-fare`, `/stats/summary`, `/stats/zones/{id}`
-- [ ] Streamlit live dashboard
+- [x] Streamlit live dashboard — 3 tabs (Live Metrics, Analytics, Health), auto-refreshing
 - [ ] Benchmarking mode

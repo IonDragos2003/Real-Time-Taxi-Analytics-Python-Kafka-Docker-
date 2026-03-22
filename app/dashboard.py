@@ -38,7 +38,7 @@ with st.sidebar:
 def fetch(endpoint: str):
     """Fetch JSON from the API. Returns (data, error_string)."""
     try:
-        r = requests.get(f"{API_BASE}{endpoint}", timeout=3)
+        r = requests.get(f"{API_BASE}{endpoint}", timeout=1)
         r.raise_for_status()
         return r.json(), None
     except requests.exceptions.ConnectionError:
