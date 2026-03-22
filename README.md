@@ -36,8 +36,8 @@ parquet file
 
 1. **Producer** — reads NYC TLC parquet data row by row, publishes each trip as a JSON event to `taxi_rides.raw`, keyed by `PULocationID` so all rides from the same zone route to the same partition
 2. **Processor** — consumes `taxi_rides.raw`, validates and normalises records, computes windowed aggregations per zone (5-min active count, 15-min avg fare), routes bad records to DLQ; multiple instances share load via consumer group
-3. **API (FastAPI)** — reads `taxi_aggregates` into memory, serves HTTP endpoints for per-zone stats
-4. **Dashboard (Streamlit)** — live auto-refreshing view of pipeline metrics, analytics, and health
+3. **API (FastAPI)** — reads `taxi_aggregates` and `taxi_rides.cleaned` into memory, serves HTTP endpoints for per-zone stats and enriched analytics
+4. **Dashboard (Streamlit)** — live auto-refreshing view of pipeline metrics, zone analytics, deep analytics (tips, duration, congestion, ratecodes, DLQ), and admin controls
 
 ## Tech stack
 
@@ -130,6 +130,8 @@ python3 -u -m app.main --api
 
 Interactive docs at **[http://localhost:8000/docs](http://localhost:8000/docs)**
 
+> After a topic reset (via the dashboard Admin button), restart the API so its background consumers reconnect to the fresh topics.
+
 ### 6. Start the Streamlit dashboard (Terminal 5)
 
 ```bash
@@ -137,6 +139,10 @@ streamlit run app/dashboard.py
 ```
 
 Dashboard at **[http://localhost:8501](http://localhost:8501)**
+
+#### Resetting between runs
+
+Use the **🗑️ Reset all topics** button in the dashboard sidebar to wipe all topic data and recreate topics cleanly. Then restart the API and re-run the processors and producer.
 
 ### 7. Verify partition split
 
@@ -193,6 +199,8 @@ logs/
 | **Windowed aggregations** | In-memory 5-min active count and 15-min avg fare per zone |
 | **Stream processor pattern** | Processor consumes one topic and produces to multiple output topics |
 | **Topic creation via AdminClient** | Topics created programmatically with correct partition counts on startup |
+| **Topic deletion + reset** | Dashboard admin button deletes and recreates all topics, clears API state |
+| **Independent consumers** | API background threads use `group_id=None` — never interfere with processor group |
 
 ## Next steps
 
@@ -225,5 +233,10 @@ logs/
 - [x] Verified no message overlap across instances via partition logs
 - [x] Processed 18,000 messages across 6 months of NYC TLC data
 - [x] FastAPI serving layer — `/health`, `/stats/active-rides`, `/stats/avg-fare`, `/stats/summary`, `/stats/zones/{id}`
-- [x] Streamlit live dashboard — 3 tabs (Live Metrics, Analytics, Health), auto-refreshing
-- [ ] Benchmarking mode
+- [x] Enriched analytics endpoints — `/stats/enriched`, `/stats/ratecodes`, `/stats/dlq-reasons`
+- [x] Streamlit live dashboard — 4 tabs: Live Metrics, Analytics, Health, Deep Analytics
+- [x] Deep Analytics tab — avg tip rate, trip duration, CBD congestion fee %, ratecode distribution, DLQ reasons
+- [x] Dashboard admin controls — zone lookup sidebar widget, topic reset with confirmation
+- [ ] Zone name lookup — map numeric zone IDs to NYC TLC zone names (e.g. 237 → "Upper East Side South")
+- [ ] Consumer lag monitoring — track and visualise per-partition lag in the Health tab
+- [ ] Benchmarking mode — compare throughput across partition/consumer configs

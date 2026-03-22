@@ -74,7 +74,10 @@ def normalise(event: dict) -> dict:
         "distance_km":    round(event["trip_distance"] * 1.60934, 2),
         "fare_amount":    event["fare_amount"],
         "total_amount":   event["total_amount"],
-        "payment_type":   event.get("payment_type"),
+        "payment_type":       event.get("payment_type"),
+        "tip_amount":         float(event.get("tip_amount") or 0.0),
+        "ratecode_id":        event.get("RatecodeID"),
+        "cbd_congestion_fee": float(event.get("cbd_congestion_fee") or 0.0),
     }
 
 

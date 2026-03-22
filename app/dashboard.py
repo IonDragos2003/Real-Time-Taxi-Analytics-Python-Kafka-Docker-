@@ -10,14 +10,60 @@ import time
 import requests
 import streamlit as st
 import pandas as pd
+from kafka.admin import KafkaAdminClient, NewTopic
+from kafka.errors import UnknownTopicOrPartitionError, TopicAlreadyExistsError
 
 API_BASE = "http://localhost:8000"
+_KAFKA_BOOTSTRAP = "localhost:29092"
+_ALL_TOPICS = ["taxi_rides.raw", "taxi_rides.cleaned", "taxi_rides.dlq", "taxi_aggregates"]
+
+
+def _reset_topics() -> None:
+    """Delete and recreate all pipeline topics, then clear the API's in-memory state."""
+    admin = KafkaAdminClient(bootstrap_servers=_KAFKA_BOOTSTRAP)
+    try:
+        admin.delete_topics(_ALL_TOPICS)
+    except (UnknownTopicOrPartitionError, Exception):
+        pass
+
+    new_topics = [
+        NewTopic("taxi_rides.raw",     num_partitions=3, replication_factor=1),
+        NewTopic("taxi_rides.cleaned", num_partitions=3, replication_factor=1),
+        NewTopic("taxi_rides.dlq",     num_partitions=1, replication_factor=1),
+        NewTopic("taxi_aggregates",    num_partitions=1, replication_factor=1,
+                 topic_configs={"cleanup.policy": "compact"}),
+    ]
+    # Create each topic individually — Kafka deletion is async so retry until accepted
+    for topic in new_topics:
+        for _ in range(30):
+            try:
+                admin.create_topics([topic])
+                break
+            except TopicAlreadyExistsError:
+                time.sleep(0.5)
+    admin.close()
+
+    try:
+        requests.post(f"{API_BASE}/admin/clear-state", timeout=2)
+    except Exception:
+        pass
 
 st.set_page_config(
     page_title="Taxi Analytics Dashboard",
     page_icon="🚕",
     layout="wide",
 )
+
+# ── Session state ─────────────────────────────────────────────────────────────
+if "prev_cleaned" not in st.session_state:
+    st.session_state.prev_cleaned = 0
+    st.session_state.prev_ts = time.time()
+    st.session_state.msgs_per_sec = 0.0
+if "zone_result" not in st.session_state:
+    st.session_state.zone_result = None
+    st.session_state.zone_err = None
+if "confirm_reset" not in st.session_state:
+    st.session_state.confirm_reset = False
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -31,6 +77,41 @@ with st.sidebar:
     st.markdown("- Producer → `taxi_rides.raw`")
     st.markdown("- Processor → `taxi_aggregates`")
     st.markdown("- FastAPI → `localhost:8000`")
+
+    # ── Zone lookup ────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("**Zone Lookup**")
+    zone_input = st.text_input("Zone ID", placeholder="e.g. 237", label_visibility="collapsed")
+    if st.button("Look up", use_container_width=True) and zone_input.strip():
+        data, err = fetch(f"/stats/zones/{zone_input.strip()}")
+        st.session_state.zone_result = data
+        st.session_state.zone_err = err
+    if st.session_state.zone_err:
+        st.error(st.session_state.zone_err)
+    elif st.session_state.zone_result:
+        d = st.session_state.zone_result
+        st.metric("Active rides (5m)", d.get("active_rides_5min", "—"))
+        st.metric("Avg fare (15m)", f"${d.get('avg_fare_15min', 0):.2f}")
+        st.caption(str(d.get("computed_at", ""))[:19].replace("T", " "))
+
+    # ── Admin ──────────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("**Admin**")
+    if not st.session_state.confirm_reset:
+        if st.button("🗑️ Reset all topics", use_container_width=True):
+            st.session_state.confirm_reset = True
+    else:
+        st.warning("Delete all topic data?")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Yes", type="primary", use_container_width=True):
+                with st.spinner("Resetting…"):
+                    _reset_topics()
+                st.session_state.confirm_reset = False
+                st.success("Done — restart API to reattach consumers.")
+        with c2:
+            if st.button("No", use_container_width=True):
+                st.session_state.confirm_reset = False
 
 
 # ── Data fetchers ─────────────────────────────────────────────────────────────
@@ -47,18 +128,16 @@ def fetch(endpoint: str):
         return None, str(e)
 
 
-# ── Session state for throughput tracking ─────────────────────────────────────
-if "prev_cleaned" not in st.session_state:
-    st.session_state.prev_cleaned = 0
-    st.session_state.prev_ts = time.time()
-    st.session_state.msgs_per_sec = 0.0
 
 
 # ── Fetch all data up front ───────────────────────────────────────────────────
-health_data, health_err = fetch("/health")
-summary_data, summary_err = fetch("/stats/summary")
-rides_data, rides_err = fetch("/stats/active-rides")
-fare_data, fare_err = fetch("/stats/avg-fare")
+health_data, health_err     = fetch("/health")
+summary_data, summary_err   = fetch("/stats/summary")
+rides_data, rides_err       = fetch("/stats/active-rides")
+fare_data, fare_err         = fetch("/stats/avg-fare")
+enriched_data, enriched_err = fetch("/stats/enriched")
+ratecodes_data, _           = fetch("/stats/ratecodes")
+dlq_reasons_data, _         = fetch("/stats/dlq-reasons")
 
 # Update throughput
 if health_data:
@@ -72,7 +151,9 @@ if health_data:
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_metrics, tab_analytics, tab_health = st.tabs(["📊 Live Metrics", "🗺 Analytics", "🩺 Health"])
+tab_metrics, tab_analytics, tab_health, tab_deep = st.tabs(
+    ["📊 Live Metrics", "🗺 Analytics", "🩺 Health", "🔍 Deep Analytics"]
+)
 
 
 # ══ Tab 1: Live Metrics ═══════════════════════════════════════════════════════
@@ -227,6 +308,88 @@ with tab_health:
             st.markdown(f"{icon} `{endpoint}`")
     else:
         st.info("Waiting for data...")
+
+
+# ══ Tab 4: Deep Analytics ═════════════════════════════════════════════════════
+with tab_deep:
+    st.header("Deep Analytics")
+
+    if enriched_err:
+        st.error(enriched_err)
+    elif not enriched_data:
+        st.info("No enriched data yet — run the producer and processor first.")
+    else:
+        df_e = pd.DataFrame(enriched_data.values())
+        df_e["zone"] = df_e["zone"].astype(str)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("💳 Avg Tip Rate — top 10 zones (credit card rides only)")
+            df_tip = (
+                df_e[df_e["avg_tip_pct"] > 0][["zone", "avg_tip_pct"]]
+                .sort_values("avg_tip_pct", ascending=False)
+                .head(10)
+                .sort_values("avg_tip_pct", ascending=True)
+            )
+            if not df_tip.empty:
+                st.bar_chart(df_tip.set_index("zone"), horizontal=True)
+            else:
+                st.info("No tip data yet (needs credit card rides with tip_amount).")
+
+        with col2:
+            st.subheader("⏱️ Avg Trip Duration — top 10 zones (minutes)")
+            df_dur = (
+                df_e[df_e["avg_duration_min"] > 0][["zone", "avg_duration_min"]]
+                .sort_values("avg_duration_min", ascending=False)
+                .head(10)
+                .sort_values("avg_duration_min", ascending=True)
+            )
+            if not df_dur.empty:
+                st.bar_chart(df_dur.set_index("zone"), horizontal=True)
+            else:
+                st.info("No duration data yet.")
+
+        st.divider()
+        col3, col4 = st.columns(2)
+
+        with col3:
+            st.subheader("🏙️ CBD Congestion Fee — % rides charged (top 10 zones)")
+            df_cong = (
+                df_e[df_e["congestion_pct"] > 0][["zone", "congestion_pct"]]
+                .sort_values("congestion_pct", ascending=False)
+                .head(10)
+                .sort_values("congestion_pct", ascending=True)
+            )
+            if not df_cong.empty:
+                st.bar_chart(df_cong.set_index("zone"), horizontal=True)
+            else:
+                st.info("No congestion fee data yet.")
+
+        with col4:
+            st.subheader("🚕 Trip Type Distribution (RatecodeID)")
+            if ratecodes_data:
+                df_rc = (
+                    pd.DataFrame(
+                        [{"Type": v["label"], "Count": v["count"]} for v in ratecodes_data.values()]
+                    )
+                    .sort_values("Count", ascending=True)
+                )
+                if not df_rc.empty:
+                    st.bar_chart(df_rc.set_index("Type"), horizontal=True)
+            else:
+                st.info("No ratecode data yet.")
+
+        st.divider()
+        st.subheader("🗑️ DLQ Rejection Reasons")
+        if dlq_reasons_data:
+            df_dlq = (
+                pd.DataFrame(list(dlq_reasons_data.items()), columns=["Reason", "Count"])
+                .sort_values("Count", ascending=True)
+            )
+            st.bar_chart(df_dlq.set_index("Reason"), horizontal=True)
+        else:
+            st.info("No DLQ data — all messages are clean.")
 
 
 # ── Auto-refresh ──────────────────────────────────────────────────────────────
