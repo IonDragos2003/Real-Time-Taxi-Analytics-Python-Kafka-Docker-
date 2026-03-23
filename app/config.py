@@ -23,10 +23,12 @@ AGGREGATES_PARTITIONS = 1
 # =============================================================================
 # Producer
 # =============================================================================
-DATA_DIR     = "data/raw"   # producer globs all *.parquet files here
-ROWS_PER_SEC = 200          # throttle — rows sent per second per file
-MAX_ROWS     = 3000         # max rows per file (0 = no limit)
-BATCH_SIZE   = 5000         # parquet read batch size
+import os
+
+DATA_DIR     = "data/raw"                             # producer globs all *.parquet files here
+ROWS_PER_SEC = int(os.environ.get("ROWS_PER_SEC", "200"))   # throttle (0 = no limit)
+MAX_ROWS     = int(os.environ.get("MAX_ROWS",     "3000"))  # max rows per file (0 = no limit)
+BATCH_SIZE   = 5000                                   # parquet read batch size
 
 # =============================================================================
 # Processor

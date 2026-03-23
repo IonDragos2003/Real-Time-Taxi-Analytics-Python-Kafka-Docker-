@@ -54,6 +54,12 @@ _zone_duration: dict  = defaultdict(lambda: {"dur_sum": 0.0, "count": 0})
 _zone_congestion: dict = defaultdict(lambda: {"fee_sum": 0.0, "rides_with_fee": 0, "total": 0})
 _ratecode_counts: dict = defaultdict(int)
 _dlq_reasons: dict     = defaultdict(int)
+_monthly_stats: dict   = defaultdict(lambda: {
+    "total_rides": 0,
+    "fare_sum": 0.0,    "fare_count": 0,
+    "tip_sum": 0.0,     "tip_fare_sum": 0.0,
+    "duration_sum": 0.0, "duration_count": 0,
+})
 
 
 # ── Background threads ─────────────────────────────────────────────────────────
@@ -122,7 +128,10 @@ def _consume_enriched() -> None:
         v = msg.value
 
         if msg.topic == DLQ_TOPIC:
-            _dlq_reasons[v.get("dlq_reason", "unknown")] += 1
+            raw_reason = v.get("dlq_reason", "unknown")
+            # Strip the specific value (e.g. "invalid fare_amount: -5.5" → "invalid fare_amount")
+            category = raw_reason.split(":")[0].strip() if ":" in raw_reason else raw_reason
+            _dlq_reasons[category] += 1
             continue
 
         zone = str(v.get("pickup_zone", "unknown"))
@@ -152,6 +161,7 @@ def _consume_enriched() -> None:
                 pass
 
         # Trip duration in minutes
+        minutes = None
         try:
             pickup  = datetime.fromisoformat(str(v["pickup_time"]).replace("Z", ""))
             dropoff = datetime.fromisoformat(str(v["dropoff_time"]).replace("Z", ""))
@@ -159,8 +169,28 @@ def _consume_enriched() -> None:
             if 0 < minutes < 120:
                 _zone_duration[zone]["dur_sum"] += minutes
                 _zone_duration[zone]["count"]   += 1
+            else:
+                minutes = None
         except Exception:
             pass
+
+        # Monthly aggregation — key is "YYYY-MM" from pickup_time
+        month_key = str(v.get("pickup_time", ""))[:7]
+        if len(month_key) == 7 and month_key[4] == "-":
+            ms = _monthly_stats[month_key]
+            ms["total_rides"] += 1
+            fare = float(v.get("fare_amount") or 0.0)
+            if fare > 0:
+                ms["fare_sum"]   += fare
+                ms["fare_count"] += 1
+            if v.get("payment_type") == 1:
+                tip = float(v.get("tip_amount") or 0.0)
+                if fare > 0:
+                    ms["tip_sum"]      += tip
+                    ms["tip_fare_sum"] += fare
+            if minutes is not None:
+                ms["duration_sum"]   += minutes
+                ms["duration_count"] += 1
 
 
 # ── App lifecycle ──────────────────────────────────────────────────────────────
@@ -317,6 +347,21 @@ def get_dlq_reasons():
     return dict(sorted(_dlq_reasons.items(), key=lambda x: -x[1]))
 
 
+@app.get("/stats/monthly")
+def get_monthly():
+    """Month-over-month aggregates: rides, avg fare, avg tip %, avg duration."""
+    result = {}
+    for month, ms in sorted(_monthly_stats.items()):
+        result[month] = {
+            "month":            month,
+            "total_rides":      ms["total_rides"],
+            "avg_fare":         round(ms["fare_sum"] / ms["fare_count"], 2) if ms["fare_count"] > 0 else 0.0,
+            "avg_tip_pct":      round(ms["tip_sum"] / ms["tip_fare_sum"] * 100, 1) if ms["tip_fare_sum"] > 0 else 0.0,
+            "avg_duration_min": round(ms["duration_sum"] / ms["duration_count"], 1) if ms["duration_count"] > 0 else 0.0,
+        }
+    return result
+
+
 @app.post("/admin/clear-state")
 def clear_state():
     """Wipe all in-memory state. Call after a topic reset so stale data doesn't persist."""
@@ -328,4 +373,5 @@ def clear_state():
     _zone_congestion.clear()
     _ratecode_counts.clear()
     _dlq_reasons.clear()
+    _monthly_stats.clear()
     return {"status": "cleared"}
